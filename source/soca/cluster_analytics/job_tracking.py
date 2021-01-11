@@ -6,15 +6,15 @@ import json
 import os
 import re
 import sys
-
 import boto3
 import pytz
 import urllib3
 from elasticsearch import Elasticsearch, RequestsHttpConnection
 from elasticsearch.exceptions import NotFoundError as NotFoundError
 from requests_aws4auth import AWS4Auth
+import price_loader
 
-
+#本代码仅适用于ZHY region，且必须结合同一版本下的scale-out-computing-on-aws/source/scripts/requirements.txt文件一起使用
 def get_aligo_configuration():
     '''
     Return general configuration parameter
@@ -26,39 +26,17 @@ def get_aligo_configuration():
 
 
 def get_aws_pricing(ec2_instance_type):
-
     pricing = {}
-    response = client.get_products(
-        ServiceCode='AmazonEC2',
-        Filters=[
-            {
-                'Type': 'TERM_MATCH',
-                'Field': 'usageType',
-                'Value': 'BoxUsage:' + ec2_instance_type
-            },
-        ],
-
-    )
-    for data in response['PriceList']:
-        data = ast.literal_eval(data)
-        for k, v in data['terms'].items():
-            if k == 'OnDemand':
-                for skus in v.keys():
-                    for ratecode in v[skus]['priceDimensions'].keys():
-                        instance_data = v[skus]['priceDimensions'][ratecode]
-                        if 'on demand linux ' + str(ec2_instance_type) + ' instance hour' in instance_data['description'].lower():
-                            pricing['ondemand'] = float(instance_data['pricePerUnit']['USD'])
-            else:
-                for skus in v.keys():
-                    if v[skus]['termAttributes']['OfferingClass'] == 'standard' \
-                            and v[skus]['termAttributes']['LeaseContractLength'] == '1yr' \
-                            and v[skus]['termAttributes']['PurchaseOption'] == 'No Upfront':
-                        for ratecode in v[skus]['priceDimensions'].keys():
-                            instance_data = v[skus]['priceDimensions'][ratecode]
-                            if 'Linux/UNIX (Amazon VPC)' in instance_data['description']:
-                                pricing['reserved'] = float(instance_data['pricePerUnit']['USD'])
-
-
+    file_path = ''
+    try:
+        SOCA_CONFIGURATION = os.environ["SOCA_CONFIGURATION"]
+        file_path = "/apps/soca/" + SOCA_CONFIGURATION + "/cluster_analytics/price.xlsx"
+    except NotFoundError:
+        print("Error message :Can' not find the price file for SOCA")
+        return False
+    pricing['ondemand'] = price_loader.read_xlrd(file_path)[ec2_instance_type][0]
+    pricing['reserved'] = price_loader.read_xlrd(file_path)[ec2_instance_type][1]
+    print('Finished loading price...')
     return pricing
 
 
@@ -84,11 +62,11 @@ def es_entry_exist(job_id):
     }
     try:
         response = es.search(index="jobs",
-                         scroll='2m',
-                         size=1000,
-                         body=json_to_push)
+                             scroll='2m',
+                             size=1000,
+                             body=json_to_push)
     except NotFoundError:
-        print("First entry, Index doest not exist but will be created automaticall.y")
+        print("First entry, Index doest not exist but will be created automatically")
         return False
 
     sid = response['_scroll_id']
@@ -125,7 +103,7 @@ def es_index_new_item(body):
 
 
 def read_file(filename):
-    print('Opening ' +filename)
+    print('Opening ' + filename)
     try:
         log_file = open(filename, 'r')
         content = log_file.read()
@@ -138,19 +116,20 @@ def read_file(filename):
 
 if __name__ == "__main__":
 
-
     urllib3.disable_warnings()
     aligo_configuration = get_aligo_configuration()
 
     # Pricing API is only available us-east-1
-    client = boto3.client('pricing', region_name='us-east-1')
-    accounting_log_path='/var/spool/pbs/server_priv/accounting/'
+    # client = boto3.client('pricing', region_name='us-east-1')
+    accounting_log_path = '/var/spool/pbs/server_priv/accounting/'
     # Change PyTZ as needed
     tz = pytz.timezone('America/Los_Angeles')
     session = boto3.Session()
     credentials = session.get_credentials()
-    awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, session.region_name, 'es', session_token=credentials.token)
+    awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, session.region_name, 'es',
+                       session_token=credentials.token)
     es_endpoint = 'https://' + aligo_configuration['ESDomainEndpoint']
+
     es = Elasticsearch([es_endpoint], port=443,
                        http_auth=awsauth,
                        use_ssl=True,
@@ -169,7 +148,7 @@ if __name__ == "__main__":
 
     for day in date_to_check:
         scheduler_log_format = day.strftime('%Y%m%d')
-        response = read_file(accounting_log_path+scheduler_log_format)
+        response = read_file(accounting_log_path + scheduler_log_format)
         try:
             for line in response.splitlines():
                 try:
@@ -198,31 +177,28 @@ if __name__ == "__main__":
                 except Exception as e:
                     exc_type, exc_obj, exc_tb = sys.exc_info()
                     fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                    print (exc_type, fname, exc_tb.tb_lineno, line)
+                    print(exc_type, fname, exc_tb.tb_lineno, line)
                     exit(1)
 
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print (exc_type, fname, exc_tb.tb_lineno, line)
+            print(exc_type, fname, exc_tb.tb_lineno, line)
             exit(1)
             # logger.error('Error while parsing logs ' + pbs_accounting_log_date + ' : ' + str((exc_type, fname, exc_tb.tb_lineno)))
-
     for job_id, values in output.items():
         try:
             for data in values:
                 try:
                     if data['job_state'].lower() == 'e':
                         ignore = False
-                        if 'Resource_List.instance_type' not in data['job_data']:
+                        if 'resources_used.instance_type' not in data['job_data']:
                             # job not done
                             ignore = True
                         else:
                             queue = re.search(r'queue=(\w+)', data['job_data']).group(1)
-
                         if ignore is False:
                             used_resources = re.findall('(\w+)=([^\s]+)', data['job_data'])
-
                             if used_resources:
                                 tmp = {'job_id': job_id}
                                 for res in used_resources:
@@ -238,9 +214,8 @@ if __name__ == "__main__":
                                         if ppn:
                                             tmp['ppn'] = int(re.search(r'ppn=(\d+)', resource_value).group(1))
 
-                                    tmp[resource_name] = int(resource_value) if resource_value.isdigit() is True else resource_value
-
-
+                                    tmp[resource_name] = int(
+                                        resource_value) if resource_value.isdigit() is True else resource_value
                                 # Adding custom field to index
                                 tmp['simulation_time_seconds'] = tmp['end'] - tmp['start']
                                 tmp['simulation_time_minutes'] = float(tmp['simulation_time_seconds'] / 60)
@@ -258,13 +233,13 @@ if __name__ == "__main__":
 
                                 # Calculate price of the simulation
                                 # ESTIMATE ONLY. Refer to AWS Cost Explorer for exact data
-                                
+
                                 # Update EBS rate for your region
                                 # EBS Formulas: https://aws.amazon.com/ebs/pricing/
-                                ebs_gp2_storage = 0.1  # $ per gb per month
-                                ebs_io1_storage = 0.125  # $ per gb per month
-                                provisionied_io = 0.065  # IOPS per month
-                                fsx_lustre = 0.000194 # GB per hour
+                                ebs_gp2_storage = 0.664  # $ per gb per month
+                                ebs_io1_storage = 0.764  # $ per gb per month
+                                provisionied_io = 0.399  # IOPS per month
+                                fsx_lustre = 0.001539  # GB per hour
                                 # Note 1: This calculate the price of the simulation based on run time only.
                                 # It does not include the time for EC2 to be launched and configured, so I artificially added a 5 minutes penalty (average time for an EC2 instance to be provisioned)
                                 EC2_BOOT_DELAY = 300
@@ -275,42 +250,60 @@ if __name__ == "__main__":
                                 tmp['estimated_price_fsx_lustre'] = 0
 
                                 if 'root_size' in tmp.keys():
-                                    tmp['estimated_price_storage_root_size'] = ((int(tmp['root_size']) * ebs_gp2_storage * simulation_time_seconds_with_penalty) / (86400 * 30)) * tmp['nodect']
+                                    tmp['estimated_price_storage_root_size'] = ((int(
+                                        tmp['root_size']) * ebs_gp2_storage * simulation_time_seconds_with_penalty) / (
+                                                                                            86400 * 30)) * tmp['nodect']
 
                                 if 'scratch_size' in tmp.keys():
                                     if 'scratch_iops' in tmp.keys():
-                                        tmp['estimated_price_storage_scratch_size'] = ((int(tmp['scratch_size']) * ebs_io1_storage * simulation_time_seconds_with_penalty) / (86400 * 30)) * tmp['nodect']
-                                        tmp['estimated_price_storage_scratch_iops'] = ((int(tmp['scratch_iops']) * provisionied_io * simulation_time_seconds_with_penalty) / (86400 * 30)) * tmp['nodect']
+                                        tmp['estimated_price_storage_scratch_size'] = ((int(tmp[
+                                                                                                'scratch_size']) * ebs_io1_storage * simulation_time_seconds_with_penalty) / (
+                                                                                                   86400 * 30)) * tmp[
+                                                                                          'nodect']
+                                        tmp['estimated_price_storage_scratch_iops'] = ((int(tmp[
+                                                                                                'scratch_iops']) * provisionied_io * simulation_time_seconds_with_penalty) / (
+                                                                                                   86400 * 30)) * tmp[
+                                                                                          'nodect']
                                     else:
-                                        tmp['estimated_price_storage_scratch_size'] = ((int(tmp['scratch_size']) * ebs_gp2_storage * simulation_time_seconds_with_penalty) / (86400 * 30)) * tmp['nodect']
+                                        tmp['estimated_price_storage_scratch_size'] = ((int(tmp[
+                                                                                                'scratch_size']) * ebs_gp2_storage * simulation_time_seconds_with_penalty) / (
+                                                                                                   86400 * 30)) * tmp[
+                                                                                          'nodect']
 
                                 if 'fsx_lustre_bucket' in tmp.keys():
                                     if tmp['fsx_lustre_bucket'] != 'false':
                                         if 'fsx_lustre_size' in tmp.keys():
-                                            tmp['estimated_price_fsx_lustre'] = tmp['fsx_lustre_size'] * fsx_lustre * (simulation_time_seconds_with_penalty / 3600)
+                                            tmp['estimated_price_fsx_lustre'] = tmp['fsx_lustre_size'] * fsx_lustre * (
+                                                        simulation_time_seconds_with_penalty / 3600)
                                         else:
                                             # default lustre size
-                                            tmp['estimated_price_fsx_lustre'] = 1200 * fsx_lustre * (simulation_time_seconds_with_penalty / 3600)
-
+                                            tmp['estimated_price_fsx_lustre'] = 1200 * fsx_lustre * (
+                                                        simulation_time_seconds_with_penalty / 3600)
                                 if tmp['instance_type'] not in pricing_table.keys():
                                     pricing_table[tmp['instance_type']] = get_aws_pricing(tmp['instance_type'])
 
-                                tmp['estimated_price_ec2_ondemand'] = simulation_time_seconds_with_penalty * (pricing_table[tmp['instance_type']]['ondemand'] / 3600) * tmp['nodect']
+                                tmp['estimated_price_ec2_ondemand'] = simulation_time_seconds_with_penalty * (
+                                            pricing_table[tmp['instance_type']]['ondemand'] / 3600) * tmp['nodect']
                                 reserved_hourly_rate = pricing_table[tmp['instance_type']]['reserved'] / 750
-                                tmp['estimated_price_ec2_reserved'] = simulation_time_seconds_with_penalty * (reserved_hourly_rate / 3600) * tmp['nodect']
+                                tmp['estimated_price_ec2_reserved'] = simulation_time_seconds_with_penalty * (
+                                            reserved_hourly_rate / 3600) * tmp['nodect']
 
-                                tmp['estimated_price_ondemand'] = tmp['estimated_price_ec2_ondemand'] + tmp['estimated_price_storage_root_size'] + tmp['estimated_price_storage_scratch_size'] + tmp['estimated_price_storage_scratch_iops'] + tmp['estimated_price_fsx_lustre']
-                                tmp['estimated_price_reserved'] = tmp['estimated_price_ec2_reserved'] + tmp['estimated_price_storage_root_size'] + tmp['estimated_price_storage_scratch_size'] + tmp['estimated_price_storage_scratch_iops'] + tmp['estimated_price_fsx_lustre']
+                                tmp['estimated_price_ondemand'] = tmp['estimated_price_ec2_ondemand'] + tmp[
+                                    'estimated_price_storage_root_size'] + tmp['estimated_price_storage_scratch_size'] + \
+                                                                  tmp['estimated_price_storage_scratch_iops'] + tmp[
+                                                                      'estimated_price_fsx_lustre']
+                                tmp['estimated_price_reserved'] = tmp['estimated_price_ec2_reserved'] + tmp[
+                                    'estimated_price_storage_root_size'] + tmp['estimated_price_storage_scratch_size'] + \
+                                                                  tmp['estimated_price_storage_scratch_iops'] + tmp[
+                                                                      'estimated_price_fsx_lustre']
 
                             json_output.append(tmp)
                 except Exception as e:
-                    print("===========")
                     exc_type, exc_obj, exc_tb = sys.exc_info()
                     fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                     print('Error with ' + str(data))
-                    print ((exc_type, fname, exc_tb.tb_lineno))
+                    print((exc_type, fname, exc_tb.tb_lineno))
                     print('Job id: ' + str(job_id))
-                    print("===========")
                     exit(1)
 
 
@@ -318,11 +311,11 @@ if __name__ == "__main__":
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             print('Error')
-            print ((exc_type, fname, exc_tb.tb_lineno))
-            #print e
-            #print "Entry error:"
-            #print str(data)
-            #logger.error('Error while indexing job  ' + str(output[job_id]) + ' : ' + str((exc_type, fname, exc_tb.tb_lineno)))
+            print((exc_type, fname, exc_tb.tb_lineno))
+            # print e
+            # print "Entry error:"
+            # print str(data)
+            # logger.error('Error while indexing job  ' + str(output[job_id]) + ' : ' + str((exc_type, fname, exc_tb.tb_lineno)))
             exit(1)
 
     for entry in json_output:
@@ -331,9 +324,8 @@ if __name__ == "__main__":
                 print('Error while indexing ' + str(entry))
                 exit(1)
             else:
-                print('Indexed '+str(entry))
+                print('Indexed ' + str(entry))
 
         else:
-            #print 'Already Indexed' + str(entry)
+            # print 'Already Indexed' + str(entry)
             pass
-
