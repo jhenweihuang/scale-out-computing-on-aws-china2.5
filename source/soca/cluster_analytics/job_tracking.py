@@ -14,7 +14,8 @@ from elasticsearch.exceptions import NotFoundError as NotFoundError
 from requests_aws4auth import AWS4Auth
 import price_loader
 
-#本代码仅适用于ZHY region，且必须结合同一版本下的scale-out-computing-on-aws/source/scripts/requirements.txt文件一起使用
+#本代码适用于ZHY region，且必须结合同一版本下的scale-out-computing-on-aws/source/scripts/requirements.txt文件一起使用
+#您可以根据不同region的ec2价格修改price.xlsx文件以便将job_tracking功能复用到其他缺少AWS Price List API的region
 def get_aligo_configuration():
     '''
     Return general configuration parameter

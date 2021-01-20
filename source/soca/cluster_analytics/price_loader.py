@@ -23,7 +23,7 @@ def read_xlrd(excelFile):
                     # print(rowValueStr[colNum])
         # print(price_dict)
     else:
-        print("Error: empty price file...")
+        print("Error: empty price file, please check the price.xlsx file...")
     return price_dict
 
 
