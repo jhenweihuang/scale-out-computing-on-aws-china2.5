@@ -6,8 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.6.0] - 2020-12-10
 ### Added
-- Users use job tracking feature in ZHY region
-- New job_tracking.py and price_loader.py demo code can be replicted to any region without AWS Price List API
+- [Ding Jie] Users use job tracking feature in ZHY region 
+- [Ding Jie]  New job_tracking.py and price_loader.py demo code can be replicted to any region without AWS Price List API   
+- https://github.com/jhenweihuang/scale-out-computing-on-aws-china2.5/blob/issue1/source/soca/cluster_analytics/price_loader.py
+- https://github.com/jhenweihuang/scale-out-computing-on-aws-china2.5/blob/issue1/source/soca/cluster_analytics/job_tracking.py
 
 ## [2.6.0] - 2020-10-29
 ### Added
